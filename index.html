@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ケーキを切れる健康優良不良少年</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <div id="titleScreen" class="screen">
+      <div class="panel title-panel">
+        <h1>ケーキを切れ！</h1>
+        <p class="subtitle">指定された等分に、できるだけ正確に。</p>
+        <button id="startButton" class="primary-button">スタート</button>
+      </div>
+    </div>
+
+    <div id="gameScreen" class="screen hidden">
+      <div class="topbar">
+        <div>
+          <div class="label">目標</div>
+          <div id="targetText" class="target">5等分</div>
+        </div>
+        <div>
+          <div class="label">カット</div>
+          <div id="cutCountText" class="target">0</div>
+        </div>
+      </div>
+
+      <section class="game-area">
+        <div class="cake-wrap">
+          <canvas id="cakeCanvas" aria-label="ケーキ"></canvas>
+          <div id="hint" class="hint">ケーキの上をクリックして始点を決め、もう一度クリックして終点を決めます。</div>
+        </div>
+      </section>
+
+      <div class="controls">
+        <button id="finishButton" class="primary-button">切り終える</button>
+      </div>
+      <div id="ad"></div>
+    </div>
+
+    <div id="resultScreen" class="screen hidden">
+      <div class="panel result-panel">
+        <h2>リザルト</h2>
+        <div id="resultTarget" class="result-target"></div>
+
+        <div class="result-image-wrap">
+          <canvas id="resultCanvas" aria-label="切断後のケーキ"></canvas>
+        </div>
+
+        <div class="score-grid">
+          <div class="score-card">
+            <span>正確さ</span>
+            <strong id="accuracyScore">--</strong>
+          </div>
+          <div class="score-card">
+            <span>効率</span>
+            <strong id="efficiencyScore">--</strong>
+          </div>
+          <div id="madnessCard" class="score-card madness hidden">
+            <span>狂気</span>
+            <strong id="madnessScore">--</strong>
+          </div>
+        </div>
+
+        <p id="resultMessage" class="result-message"></p>
+        <div class="result-actions">
+          <button id="shareButton" class="secondary-button">SNSでシェア</button>
+        </div>
+        <div class="result-actions">
+          <button id="retryButton" class="primary-button">もう一度</button>
+          <button id="backButton" class="secondary-button">タイトルへ戻る</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
