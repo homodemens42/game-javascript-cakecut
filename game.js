@@ -719,7 +719,7 @@ function buildShareText() {
     `切断距離：${cuts.reduce((s, c) => s + c.length, 0).toFixed(1)}px`,
     `カット回数：${cuts.length}`,
     madnessText.trim(),
-    "#ケーキの切れない非行少年たち",
+    "#ケーキの切れる健康優良不良少年たち",
   ].filter(Boolean).join("\n");
 }
 
