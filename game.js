@@ -10,9 +10,13 @@ const CONFIG = {
   // Hidden madness threshold. It is intentionally not shown below this value.
   madnessThreshold: 0.50,
 
-  // 狂気は「正確なのに変な切り方」を評価するため、
-  // この正確さ未満では狂気を0%にします。
+  // 狂気は「正確なのに変な切り方」を評価します。
+  // 通常は90%以上。閉ループを作る明確な構造狂気がある場合のみ
+  // フリーハンド誤差を考慮して最低精度を少し緩和します。
   madnessMinAccuracy: 90,
+  madnessLoopAccuracy1: 85,
+  madnessLoopAccuracy2: 83,
+  madnessLoopAccuracy3Plus: 80,
 
   // 狂気スコアの係数。
   // 距離超過率 × 1.5、余分な1カット +15%、閉ループ1個 +50%。
@@ -138,7 +142,13 @@ const RESULT_MESSAGES = [
   },
 ];
 
-let availableCakeImages = null;
+// 初回は cake1.png を即表示し、プレイ中に残りをバックグラウンド確認します。
+let availableCakeImages = ["assets/cake1.png"];
+let cakeImageScanPromise = null;
+
+// タイトル画面を見ている間に初回用画像だけ先読み。
+const cake1Preload = new Image();
+cake1Preload.src = "assets/cake1.png";
 
 const titleScreen = document.getElementById("titleScreen");
 const gameScreen = document.getElementById("gameScreen");
@@ -177,30 +187,56 @@ finishButton.addEventListener("click", finishGame);
 retryButton.addEventListener("click", startGame);
 shareButton.addEventListener("click", shareResult);
 
+// HTMLを変更しなくても使えるよう、操作ボタンをJS側で追加します。
+const undoButton = document.createElement("button");
+undoButton.id = "undoButton";
+undoButton.className = "secondary-button";
+undoButton.textContent = "1手戻る";
+finishButton.parentElement.insertBefore(undoButton, finishButton);
+undoButton.addEventListener("click", undoLastCut);
+
 window.addEventListener("resize", resizeCanvas);
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") cancelPendingCut();
+});
+canvas.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  cancelPendingCut();
+});
 
 function randomChoice(array) {
   return array[Math.floor(Math.random() * array.length)];
 }
 
-async function loadAvailableCakeImages() {
-  if (availableCakeImages) return availableCakeImages;
+function scanAvailableCakeImages() {
+  if (cakeImageScanPromise) return cakeImageScanPromise;
 
-  const candidates = [];
-  for (let i = 1; i <= CONFIG.cakeImageMaxNumber; i++) {
-    candidates.push(`assets/cake${i}.png`);
-  }
+  cakeImageScanPromise = (async () => {
+    const candidates = [];
+    for (let i = 1; i <= CONFIG.cakeImageMaxNumber; i++) {
+      candidates.push(`assets/cake${i}.png`);
+    }
 
-  const checks = candidates.map(src => new Promise(resolve => {
-    const img = new Image();
-    img.onload = () => resolve(src);
-    img.onerror = () => resolve(null);
-    img.src = src;
-  }));
+    const checks = candidates.map(src => new Promise(resolve => {
+      const img = new Image();
+      img.onload = () => resolve(src);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    }));
 
-  const results = await Promise.all(checks);
-  availableCakeImages = results.filter(Boolean);
-  return availableCakeImages;
+    const results = await Promise.all(checks);
+    const found = results.filter(Boolean);
+
+    if (found.length) {
+      availableCakeImages = found;
+    } else {
+      console.error("assetsフォルダに利用可能なケーキ画像がありません。");
+    }
+
+    return availableCakeImages;
+  })();
+
+  return cakeImageScanPromise;
 }
 
 async function startGame() {
@@ -222,23 +258,25 @@ async function startGame() {
   resultScreen.classList.add("hidden");
   gameScreen.classList.remove("hidden");
 
-  const images = await loadAvailableCakeImages();
-  if (!images.length) {
-    alert("assetsフォルダに cake1.png、cake2.png… の形式でケーキ画像を入れてください。");
-    return;
-  }
-
-  const selected = randomChoice(images);
+  // 初回は cake1 を待たずに使用。スキャン完了後のラウンドは確認済み一覧からランダム。
+  const selected = randomChoice(availableCakeImages);
   cakeImage = new Image();
 
   cakeImage.onload = () => {
     cakeInfo = buildCakeInfo(cakeImage);
     resizeCanvas();
     draw();
+
+    // 画面表示後に cake1～cakeN の存在確認を開始。
+    // 次のゲームから確認済み画像をランダム利用できます。
+    scanAvailableCakeImages().catch(error => {
+      console.error("ケーキ画像のバックグラウンド確認に失敗しました。", error);
+    });
   };
 
   cakeImage.onerror = () => {
     alert(`ケーキ画像を読み込めませんでした: ${selected}`);
+    showTitle();
   };
 
   cakeImage.src = selected;
@@ -259,10 +297,32 @@ function resizeCanvas() {
 
   const rect = canvas.getBoundingClientRect();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const oldDisplaySize = displaySize;
+  const newDisplaySize = rect.width;
+
+  // 保存済みのカット座標は画面座標なので、Canvasサイズ変更時に同じ比率で追従させます。
+  if (oldDisplaySize > 0 && newDisplaySize > 0 && oldDisplaySize !== newDisplaySize) {
+    const scale = newDisplaySize / oldDisplaySize;
+    const scalePoint = (point) => {
+      if (!point) return;
+      point.x *= scale;
+      point.y *= scale;
+    };
+
+    for (const cut of cuts) {
+      scalePoint(cut.a);
+      scalePoint(cut.b);
+      scalePoint(cut.cutA);
+      scalePoint(cut.cutB);
+      cut.length *= scale;
+    }
+    scalePoint(pendingStart);
+    scalePoint(previewPoint);
+  }
 
   canvas.width = Math.round(rect.width * dpr);
   canvas.height = Math.round(rect.height * dpr);
-  displaySize = rect.width;
+  displaySize = newDisplaySize;
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   draw();
@@ -421,10 +481,10 @@ canvas.addEventListener("touchmove", (event) => {
   const touch = event.touches[0];
   if (!touch) return;
   const rect = canvas.getBoundingClientRect();
-  previewPoint = {
+  previewPoint = snapPoint({
     x: touch.clientX - rect.left,
     y: touch.clientY - rect.top,
-  };
+  });
   draw();
 }, { passive: true });
 
@@ -469,11 +529,40 @@ canvas.addEventListener("click", (event) => {
 
   // Show the current number of actual connected pieces immediately.
   const analysis = analyzeCuts();
+  lastAnalysis = analysis;
   cutCountText.textContent = `ピース ${analysis.regionCount}`;
   hint.textContent =
     `現在 ${analysis.regionCount}ピース / 目標 ${currentTargetParts}等分`;
   draw();
 });
+
+function cancelPendingCut() {
+  if (!pendingStart) return;
+  pendingStart = null;
+  previewPoint = null;
+  hint.textContent = `現在 ${lastAnalysis ? lastAnalysis.regionCount : analyzeCuts().regionCount}ピース / 目標 ${currentTargetParts}等分`;
+  draw();
+}
+
+function undoLastCut() {
+  // 始点選択中なら、まずその始点だけ取り消します。
+  if (pendingStart) {
+    cancelPendingCut();
+    return;
+  }
+
+  if (!cuts.length) {
+    hint.textContent = "戻せるカットはありません。";
+    return;
+  }
+
+  cuts.pop();
+  const analysis = analyzeCuts();
+  lastAnalysis = analysis;
+  cutCountText.textContent = `ピース ${analysis.regionCount}`;
+  hint.textContent = `1手戻しました。現在 ${analysis.regionCount}ピース / 目標 ${currentTargetParts}等分`;
+  draw();
+}
 
 function clipSegmentToCake(a, b) {
   const cx = cakeInfo.centerX;
@@ -862,8 +951,8 @@ function analyzeCuts() {
   }
 
   const regionSizes = [];
-  const queueX = new Int32Array(n * n);
-  const queueY = new Int32Array(n * n);
+  // x/yを別々に持たず、1次元indexだけをキューに積んでメモリとGC負荷を減らします。
+  const queue = new Int32Array(n * n);
 
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
@@ -872,35 +961,45 @@ function analyzeCuts() {
 
       let head = 0;
       let tail = 0;
-      queueX[tail] = x;
-      queueY[tail] = y;
-      tail++;
+      queue[tail++] = idx;
       visited[idx] = 1;
 
       let size = 0;
 
       while (head < tail) {
-        const qx = queueX[head];
-        const qy = queueY[head];
-        head++;
+        const current = queue[head++];
+        const qx = current % n;
+        const qy = Math.floor(current / n);
         size++;
 
-        const neighbors = [
-          [qx + 1, qy],
-          [qx - 1, qy],
-          [qx, qy + 1],
-          [qx, qy - 1],
-        ];
-
-        for (const [nx, ny] of neighbors) {
-          if (nx < 0 || nx >= n || ny < 0 || ny >= n) continue;
-          const ni = ny * n + nx;
-          if (!inside[ni] || blocked[ni] || visited[ni]) continue;
-
-          visited[ni] = 1;
-          queueX[tail] = nx;
-          queueY[tail] = ny;
-          tail++;
+        // 配列を毎ピクセル生成せず4方向を直接確認します。
+        if (qx + 1 < n) {
+          const ni = current + 1;
+          if (inside[ni] && !blocked[ni] && !visited[ni]) {
+            visited[ni] = 1;
+            queue[tail++] = ni;
+          }
+        }
+        if (qx > 0) {
+          const ni = current - 1;
+          if (inside[ni] && !blocked[ni] && !visited[ni]) {
+            visited[ni] = 1;
+            queue[tail++] = ni;
+          }
+        }
+        if (qy + 1 < n) {
+          const ni = current + n;
+          if (inside[ni] && !blocked[ni] && !visited[ni]) {
+            visited[ni] = 1;
+            queue[tail++] = ni;
+          }
+        }
+        if (qy > 0) {
+          const ni = current - n;
+          if (inside[ni] && !blocked[ni] && !visited[ni]) {
+            visited[ni] = 1;
+            queue[tail++] = ni;
+          }
         }
       }
 
@@ -1066,8 +1165,25 @@ function estimateReferenceCutCount(parts) {
     case 2: return 1;
     case 3: return 3;
     case 4: return 2;
+    case 6: return 3;
+    case 8: return 4;
     default: return parts;
   }
+}
+
+function getMadnessMinAccuracy(loopCount) {
+  if (loopCount >= 3) return CONFIG.madnessLoopAccuracy3Plus;
+  if (loopCount === 2) return CONFIG.madnessLoopAccuracy2;
+  if (loopCount === 1) return CONFIG.madnessLoopAccuracy1;
+  return CONFIG.madnessMinAccuracy;
+}
+
+function getMadnessAccuracyFactor(accuracy) {
+  if (accuracy >= 95) return 1.00;
+  if (accuracy >= 90) return 0.90;
+  if (accuracy >= 85) return 0.70;
+  if (accuracy >= 80) return 0.40;
+  return 0;
 }
 
 function calculateScores(analysis) {
@@ -1098,14 +1214,17 @@ function calculateScores(analysis) {
     : 0;
 
   // 狂気は「正確なのに変な切り方」専用。
-  // 正確さが90%未満なら、距離や本数が多くても狂気0。
-  if (accuracy < CONFIG.madnessMinAccuracy) {
+  // まず構造を解析し、閉ループがある場合だけフリーハンド誤差を少し救済します。
+  const structure = analyzeCutStructure();
+  const minAccuracyForMadness = getMadnessMinAccuracy(structure.loopCount);
+
+  if (accuracy < minAccuracyForMadness) {
     return {
       accuracy,
       efficiency,
       madness: 0,
       madnessRatio: 0,
-      loopCount: 0,
+      loopCount: structure.loopCount,
       extraCuts: 0,
     };
   }
@@ -1122,11 +1241,15 @@ function calculateScores(analysis) {
   const cutMadness = extraCuts * CONFIG.madnessExtraCutBonus;
 
   // 3) 構造：閉ループ1個ごとに加点
-  const structure = analyzeCutStructure();
   const loopMadness = structure.loopCount * CONFIG.madnessLoopBonus;
 
+  // フリーハンド誤差を許容した分、精度が低い場合は狂気を段階的に減衰。
+  // 雑な切り方が「狂気」になるのを防ぎつつ、円積問題的な挑戦は拾います。
+  const accuracyFactor = getMadnessAccuracyFactor(accuracy);
+
   // 上限は設けません。100%、200%、300%超えもそのまま表示します。
-  const madnessRatio = lengthMadness + cutMadness + loopMadness;
+  const rawMadnessRatio = lengthMadness + cutMadness + loopMadness;
+  const madnessRatio = rawMadnessRatio * accuracyFactor;
   const madness = madnessRatio * 100;
 
   return {
