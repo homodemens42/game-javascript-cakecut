@@ -20,7 +20,7 @@ const CONFIG = {
 
   // 狂気スコアの係数。
   // 距離超過率 × 1.5、余分な1カット +15%、閉ループ1個 +50%。
-  madnessLengthMultiplier: 1.5,
+  madnessLengthMultiplier: 0.5,
   madnessExtraCutBonus: 0.15,
   madnessLoopBonus: 0.50,
 
