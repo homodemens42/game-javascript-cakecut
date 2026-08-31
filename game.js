@@ -20,7 +20,7 @@ const CONFIG = {
 
   // 狂気スコアの係数。
   // 距離超過率 × 1.5、余分な1カット +15%、閉ループ1個 +50%。
-  madnessLengthMultiplier: 0.5,
+  madnessLengthMultiplier: 1.5,
   madnessExtraCutBonus: 0.15,
   madnessLoopBonus: 0.50,
 
@@ -181,6 +181,15 @@ let lastScores = null;
 let lastAnalysis = null;
 let displaySize = 800;
 
+// Pointer Events でマウス・タッチ・ペンを共通処理します。
+// ほぼ動かさず離すと従来の「クリックで始点指定」、
+// 押したまま一定距離以上動かして離すとドラッグで1本確定します。
+let activePointerId = null;
+let pointerStartedNewCut = false;
+let pointerDragging = false;
+const dragStartThreshold = 6;
+canvas.style.touchAction = "none";
+
 startButton.addEventListener("click", startGame);
 backButton.addEventListener("click", showTitle);
 finishButton.addEventListener("click", finishGame);
@@ -252,7 +261,7 @@ async function startGame() {
   targetText.textContent = `${currentTargetParts}等分`;
   cutCountText.textContent = "ピース 1";
   hint.textContent =
-    "始点をクリックして、終点をクリックしてください。端点・線・円周の近くでは自動的に吸着します。";
+    "ドラッグして離すか、始点→終点の順にクリックして切ってください。端点・線・円周の近くでは自動的に吸着します。";
 
   titleScreen.classList.add("hidden");
   resultScreen.classList.add("hidden");
@@ -464,61 +473,36 @@ function drawPreviewCut(a, b) {
   ctx.restore();
 }
 
-canvas.addEventListener("mousemove", (event) => {
-  if (!pendingStart || !cakeInfo) return;
-  previewPoint = snapPoint(canvasPoint(event));
-  draw();
-});
+function updateCutProgressAfterChange(prefix = "") {
+  const analysis = analyzeCuts();
+  lastAnalysis = analysis;
+  cutCountText.textContent = `ピース ${analysis.regionCount}`;
+  hint.textContent = `${prefix}現在 ${analysis.regionCount}ピース / 目標 ${currentTargetParts}等分`;
+}
 
-canvas.addEventListener("mouseleave", () => {
-  if (!pendingStart) return;
-  previewPoint = null;
-  draw();
-});
+function tryFinishCut(endPoint) {
+  if (!pendingStart) return false;
 
-canvas.addEventListener("touchmove", (event) => {
-  if (!pendingStart || !cakeInfo) return;
-  const touch = event.touches[0];
-  if (!touch) return;
-  const rect = canvas.getBoundingClientRect();
-  previewPoint = snapPoint({
-    x: touch.clientX - rect.left,
-    y: touch.clientY - rect.top,
-  });
-  draw();
-}, { passive: true });
+  const distance = Math.hypot(
+    endPoint.x - pendingStart.x,
+    endPoint.y - pendingStart.y
+  );
 
-canvas.addEventListener("click", (event) => {
-  if (!cakeInfo) return;
-
-  const rawPoint = canvasPoint(event);
-  const p = snapPoint(rawPoint);
-
-  if (!pendingStart) {
-    pendingStart = p;
-    previewPoint = p;
-    hint.textContent =
-      "終点をクリックしてください。マウスを動かすと切断予定線が表示されます。";
-    draw();
-    return;
-  }
-
-  const distance = Math.hypot(p.x - pendingStart.x, p.y - pendingStart.y);
   if (distance < 8) {
     hint.textContent = "始点と終点を少し離してください。";
-    return;
+    return false;
   }
 
-  const clipped = clipSegmentToCake(pendingStart, p);
+  const clipped = clipSegmentToCake(pendingStart, endPoint);
   if (!clipped) {
     hint.textContent =
       "その2点を結んでもケーキを切れません。ケーキを横切る線にしてください。";
-    return;
+    return false;
   }
 
   cuts.push({
     a: pendingStart,
-    b: p,
+    b: endPoint,
     cutA: clipped.a,
     cutB: clipped.b,
     length: clipped.length,
@@ -526,14 +510,116 @@ canvas.addEventListener("click", (event) => {
 
   pendingStart = null;
   previewPoint = null;
-
-  // Show the current number of actual connected pieces immediately.
-  const analysis = analyzeCuts();
-  lastAnalysis = analysis;
-  cutCountText.textContent = `ピース ${analysis.regionCount}`;
-  hint.textContent =
-    `現在 ${analysis.regionCount}ピース / 目標 ${currentTargetParts}等分`;
+  updateCutProgressAfterChange();
   draw();
+  return true;
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (!cakeInfo) return;
+  if (event.pointerType === "mouse" && event.button !== 0) return;
+
+  activePointerId = event.pointerId;
+  pointerDragging = false;
+  pointerStartedNewCut = !pendingStart;
+
+  const p = snapPoint(canvasPoint(event));
+
+  // 始点がまだ無ければ、pointerup まで仮の始点として保持します。
+  // 動かさず離せばそのままクリック始点、ドラッグすれば1本のカットになります。
+  if (!pendingStart) {
+    pendingStart = p;
+    previewPoint = p;
+  }
+
+  try {
+    canvas.setPointerCapture(event.pointerId);
+  } catch (_) {
+    // Pointer Capture 非対応環境でも通常操作は継続できます。
+  }
+
+  draw();
+});
+
+canvas.addEventListener("pointermove", (event) => {
+  if (!cakeInfo) return;
+
+  const p = snapPoint(canvasPoint(event));
+
+  // クリックで始点を置いた後は、ボタンを押していなくても従来通りプレビューします。
+  if (pendingStart) {
+    previewPoint = p;
+  }
+
+  // 今回のpointerdownで始点を作った場合だけ、一定距離以上でドラッグ操作と判定。
+  if (
+    activePointerId === event.pointerId &&
+    pointerStartedNewCut &&
+    pendingStart
+  ) {
+    const distance = Math.hypot(
+      p.x - pendingStart.x,
+      p.y - pendingStart.y
+    );
+    if (distance >= dragStartThreshold) pointerDragging = true;
+  }
+
+  if (pendingStart) draw();
+});
+
+canvas.addEventListener("pointerup", (event) => {
+  if (!cakeInfo || activePointerId !== event.pointerId) return;
+
+  const p = snapPoint(canvasPoint(event));
+
+  if (pointerStartedNewCut) {
+    if (pointerDragging) {
+      // 押す→引く→離す：ドラッグで1本確定。
+      tryFinishCut(p);
+    } else {
+      // ほぼ動かさず離した：従来のクリック始点として残す。
+      previewPoint = p;
+      hint.textContent =
+        "終点をクリックするか、そのままドラッグして切ってください。";
+      draw();
+    }
+  } else {
+    // すでに始点があった場合は、今回のpointerupを終点として確定。
+    tryFinishCut(p);
+  }
+
+  activePointerId = null;
+  pointerStartedNewCut = false;
+  pointerDragging = false;
+
+  try {
+    canvas.releasePointerCapture(event.pointerId);
+  } catch (_) {
+    // 何もしない
+  }
+});
+
+canvas.addEventListener("pointercancel", (event) => {
+  if (activePointerId !== event.pointerId) return;
+
+  // ドラッグ開始中のキャンセルだけは仮始点も破棄。
+  if (pointerStartedNewCut && pointerDragging) {
+    pendingStart = null;
+    previewPoint = null;
+  }
+
+  activePointerId = null;
+  pointerStartedNewCut = false;
+  pointerDragging = false;
+  draw();
+});
+
+canvas.addEventListener("pointerleave", () => {
+  // クリック始点がある場合は、キャンバス外ではプレビューだけ消します。
+  if (pendingStart && activePointerId === null) {
+    previewPoint = null;
+    draw();
+  }
 });
 
 function cancelPendingCut() {
@@ -883,6 +969,35 @@ function renderResultImage() {
     c.stroke();
   }
   c.restore();
+
+  // 各ピースの内部に、そのピースが全体の何%かを直接表示します。
+  if (lastAnalysis.regions && lastAnalysis.totalArea > 0) {
+    const analysisCx = lastAnalysis.analysisSize / 2;
+    const analysisCy = lastAnalysis.analysisSize / 2;
+    const analysisR = lastAnalysis.analysisRadius;
+
+    c.save();
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.font = "700 34px sans-serif";
+    c.lineJoin = "round";
+    c.strokeStyle = "rgba(255,255,255,.95)";
+    c.fillStyle = "#3f2d25";
+    c.lineWidth = 9;
+
+    for (const region of lastAnalysis.regions) {
+      const x = cakeCx +
+        (region.labelX - analysisCx) * (cakeR / analysisR);
+      const y = cakeCy +
+        (region.labelY - analysisCy) * (cakeR / analysisR);
+      const label = `${region.percentage.toFixed(1)}%`;
+
+      c.strokeText(label, x, y);
+      c.fillText(label, x, y);
+    }
+
+    c.restore();
+  }
 }
 
 function roundRect(c, x, y, w, h, r) {
@@ -915,6 +1030,9 @@ function analyzeCuts() {
   const inside = new Uint8Array(n * n);
   const blocked = new Uint8Array(n * n);
   const visited = new Uint8Array(n * n);
+  // 各ピクセルがどのピースに属するかを記録し、
+  // リザルト画像内の%表示位置を決めるために使います。
+  const regionLabels = new Uint16Array(n * n);
 
   for (let y = 0; y < n; y++) {
     for (let x = 0; x < n; x++) {
@@ -950,7 +1068,8 @@ function analyzeCuts() {
     }
   }
 
-  const regionSizes = [];
+  const regions = [];
+  let nextRegionId = 1;
   // x/yを別々に持たず、1次元indexだけをキューに積んでメモリとGC負荷を減らします。
   const queue = new Int32Array(n * n);
 
@@ -964,13 +1083,27 @@ function analyzeCuts() {
       queue[tail++] = idx;
       visited[idx] = 1;
 
+      const regionId = nextRegionId++;
       let size = 0;
+      let sumX = 0;
+      let sumY = 0;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
 
       while (head < tail) {
         const current = queue[head++];
         const qx = current % n;
         const qy = Math.floor(current / n);
         size++;
+        sumX += qx + 0.5;
+        sumY += qy + 0.5;
+        minX = Math.min(minX, qx);
+        maxX = Math.max(maxX, qx);
+        minY = Math.min(minY, qy);
+        maxY = Math.max(maxY, qy);
+        regionLabels[current] = regionId;
 
         // 配列を毎ピクセル生成せず4方向を直接確認します。
         if (qx + 1 < n) {
@@ -1003,16 +1136,58 @@ function analyzeCuts() {
         }
       }
 
-      regionSizes.push(size);
+      const centroidX = sumX / size;
+      const centroidY = sumY / size;
+
+      // 重心がドーナツ状・凹形状ピースの外に落ちる場合があるため、
+      // 重心に最も近い「実際にそのピース内のピクセル」をラベル位置にします。
+      let labelX = centroidX;
+      let labelY = centroidY;
+      const centroidXi = Math.max(0, Math.min(n - 1, Math.floor(centroidX)));
+      const centroidYi = Math.max(0, Math.min(n - 1, Math.floor(centroidY)));
+
+      if (regionLabels[centroidYi * n + centroidXi] !== regionId) {
+        let bestDistanceSq = Infinity;
+        for (let sy = minY; sy <= maxY; sy++) {
+          for (let sx = minX; sx <= maxX; sx++) {
+            const si = sy * n + sx;
+            if (regionLabels[si] !== regionId) continue;
+            const dx = (sx + 0.5) - centroidX;
+            const dy = (sy + 0.5) - centroidY;
+            const distanceSq = dx * dx + dy * dy;
+            if (distanceSq < bestDistanceSq) {
+              bestDistanceSq = distanceSq;
+              labelX = sx + 0.5;
+              labelY = sy + 0.5;
+            }
+          }
+        }
+      }
+
+      regions.push({
+        size,
+        labelX,
+        labelY,
+      });
     }
   }
 
-  regionSizes.sort((a, b) => b - a);
+  // 大きいピース順に揃えて、既存の正確さ計算との互換性を維持します。
+  regions.sort((a, b) => b.size - a.size);
+  const regionSizes = regions.map(region => region.size);
+  const totalArea = regionSizes.reduce((a, b) => a + b, 0);
+
+  for (const region of regions) {
+    region.percentage = totalArea > 0 ? (region.size / totalArea) * 100 : 0;
+  }
 
   return {
-    regionCount: regionSizes.length,
+    regionCount: regions.length,
     regionSizes,
-    totalArea: regionSizes.reduce((a, b) => a + b, 0),
+    regions,
+    totalArea,
+    analysisSize: n,
+    analysisRadius: r,
   };
 }
 
@@ -1209,8 +1384,10 @@ function calculateScores(analysis) {
   // 効率：基準切断距離 / 実際の切断距離
   const optimalCutLength = estimateCircleReferenceLength(target);
   const actualCutLength = cuts.reduce((sum, cut) => sum + cut.length, 0);
+  // 切断効率：基準切断距離を100%とし、短く済ませた場合は100%超えも許可します。
+  // 正確さとは独立した「どれだけ短い距離で切ったか」の指標です。
   const efficiency = actualCutLength > 0
-    ? Math.min(100, (optimalCutLength / actualCutLength) * 100)
+    ? (optimalCutLength / actualCutLength) * 100
     : 0;
 
   // 狂気は「正確なのに変な切り方」専用。
